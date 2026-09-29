@@ -15,13 +15,6 @@ export const metadata: Metadata = {
   title: "Bitcoin Block Tetris · Tatum",
   description:
     "Stack real Bitcoin blocks. Each piece is shaped by its transaction count. Hover a piece for its block stats. Powered by Tatum RPC.",
-  icons: {
-    icon: [{ url: "/favicon.png", type: "image/png", sizes: "32x32" }],
-    apple: [
-      { url: "/apple-touch-icon.png", type: "image/png", sizes: "256x256" },
-    ],
-    shortcut: "/favicon.png",
-  },
   openGraph: {
     title: "Bitcoin Block Tetris · Tatum",
     description:
