@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --tatum-purple: #4f37fd;
+  --tatum-navy: #1c1e4f;
+  --tatum-teal: #2ccd9a;
+  --tatum-ink: #111827;
+  --tatum-muted: #6b7280;
+  --tatum-bg: #f4f5f8;
+}
+
+body {
+  color: var(--tatum-ink);
+  background: var(--tatum-bg);
+  min-height: 100vh;
+}
+
+::selection {
+  background: rgba(79, 55, 253, 0.2);
+}
