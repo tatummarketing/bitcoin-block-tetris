@@ -50,10 +50,13 @@ const CONTROLS: [string, string][] = [
 type Phase = "idle" | "playing" | "paused" | "over";
 
 type HighScore = {
+  id?: string;
   name: string;
   score: number;
   at: string;
 };
+
+const EXPLORER_ROWS = 8;
 
 type Feed = {
   tip: number | null;
@@ -98,6 +101,55 @@ function readScores(): HighScore[] {
   } catch {
     return [];
   }
+}
+
+function writeLocalScores(board: HighScore[]) {
+  try {
+    window.localStorage.setItem(SCORES_KEY, JSON.stringify(board.slice(0, LEADERBOARD_SIZE)));
+  } catch {
+    /* storage may be unavailable */
+  }
+}
+
+async function fetchSharedScores(): Promise<HighScore[] | null> {
+  try {
+    const data = await fetchJson<{ scores: HighScore[] }>(apiUrl("/api/scores"));
+    return Array.isArray(data.scores) ? data.scores : null;
+  } catch {
+    return null;
+  }
+}
+
+async function postSharedScore(entry: {
+  name: string;
+  score: number;
+  lines: number;
+  blocks: number;
+}): Promise<{ entry: HighScore; top: HighScore[] } | null> {
+  try {
+    const res = await fetch(apiUrl("/api/scores"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(entry),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as { entry: HighScore; top: HighScore[] };
+  } catch {
+    return null;
+  }
+}
+
+function scoreKey(entry: HighScore) {
+  return entry.id ?? entry.at;
+}
+
+function timeAgo(unix: number, now: number) {
+  const minutes = Math.max(0, Math.round((now - unix * 1000) / 60_000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
 }
 
 function qualifies(score: number, board: HighScore[]) {
@@ -214,7 +266,9 @@ export default function BlockTetris() {
   const [error, setError] = React.useState<string | null>(null);
   const [hovered, setHovered] = React.useState<BtcBlock | null>(null);
   const [pinned, setPinned] = React.useState<BtcBlock | null>(null);
-  const [scores, setScores] = React.useState<HighScore[]>([]);
+  const [scores, setScoresState] = React.useState<HighScore[]>([]);
+  const scoresRef = React.useRef<HighScore[]>([]);
+  const [shared, setShared] = React.useState(false);
   const [latestScoreAt, setLatestScoreAt] = React.useState<string | null>(null);
   const [pendingScore, setPendingScore] = React.useState<number | null>(null);
   const [nameDraft, setNameDraft] = React.useState("");
@@ -227,9 +281,24 @@ export default function BlockTetris() {
     setPhaseState(next);
   }, []);
 
+  const setScores = React.useCallback((board: HighScore[]) => {
+    scoresRef.current = board;
+    setScoresState(board);
+  }, []);
+
+  const refreshScores = React.useCallback(async () => {
+    const remote = await fetchSharedScores();
+    if (remote) {
+      setShared(true);
+      setScores(remote);
+      writeLocalScores(remote);
+    }
+  }, [setScores]);
+
   React.useEffect(() => {
     setScores(readScores());
-  }, []);
+    void refreshScores();
+  }, [refreshScores, setScores]);
 
   const loadRange = React.useCallback(async (from: number, to: number) => {
     const data = await fetchJson<BtcBlocksPayload>(
@@ -301,7 +370,8 @@ export default function BlockTetris() {
   const finish = React.useCallback(() => {
     const score = gameRef.current.score;
     setPhase("over");
-    if (!qualifies(score, readScores())) return;
+    void refreshScores();
+    if (!qualifies(score, scoresRef.current)) return;
     let lastName = "";
     try {
       lastName = window.localStorage.getItem(NAME_KEY) ?? "";
@@ -310,28 +380,37 @@ export default function BlockTetris() {
     }
     setNameDraft(lastName.slice(0, NAME_MAX));
     setPendingScore(score);
-  }, [setPhase]);
+  }, [refreshScores, setPhase]);
 
   const saveScore = React.useCallback(
-    (name: string | null) => {
+    async (name: string | null) => {
       const score = pendingScore;
       setPendingScore(null);
       if (score == null || name == null) return;
       const clean = name.replace(/\s+/g, " ").trim().slice(0, NAME_MAX) || "Anonymous";
-      const entry: HighScore = { name: clean, score, at: new Date().toISOString() };
-      const next = [...readScores(), entry]
-        .sort((a, b) => b.score - a.score)
-        .slice(0, LEADERBOARD_SIZE);
       try {
-        window.localStorage.setItem(SCORES_KEY, JSON.stringify(next));
         window.localStorage.setItem(NAME_KEY, clean);
       } catch {
         /* storage may be unavailable */
       }
+      const { lines, totals } = gameRef.current;
+      const saved = await postSharedScore({ name: clean, score, lines, blocks: totals.blocks });
+      if (saved) {
+        setShared(true);
+        setScores(saved.top);
+        writeLocalScores(saved.top);
+        setLatestScoreAt(scoreKey(saved.entry));
+        return;
+      }
+      const entry: HighScore = { name: clean, score, at: new Date().toISOString() };
+      const next = [...scoresRef.current, entry]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, LEADERBOARD_SIZE);
+      writeLocalScores(next);
       setScores(next);
-      setLatestScoreAt(entry.at);
+      setLatestScoreAt(scoreKey(entry));
     },
-    [pendingScore]
+    [pendingScore, setScores]
   );
 
   React.useEffect(() => {
@@ -398,7 +477,7 @@ export default function BlockTetris() {
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (promptOpenRef.current) {
-        if (event.key === "Escape") saveScore(null);
+        if (event.key === "Escape") void saveScore(null);
         return;
       }
       const target = event.target as HTMLElement | null;
@@ -459,6 +538,20 @@ export default function BlockTetris() {
     game.lastClear && now - game.lastClear.at < 1400 ? game.lastClear : null;
   const levelToast = game.levelUpAt != null && now - game.levelUpAt < 1600;
   const nextSpeedUp = game.level * POINTS_PER_LEVEL;
+  const wallNow = Date.now();
+  const explorerBlocks = (active ? [active.block, ...game.recent] : game.recent).slice(
+    0,
+    EXPLORER_ROWS
+  );
+  const explorerStats =
+    game.recent.length > 0
+      ? {
+          avgTxs: Math.round(
+            game.recent.reduce((sum, b) => sum + b.txs, 0) / game.recent.length
+          ),
+          avgFee: game.recent.reduce((sum, b) => sum + b.totalFee, 0) / game.recent.length,
+        }
+      : null;
 
   const blockAt = (target: EventTarget | null): BtcBlock | null => {
     const el = (target as HTMLElement | null)?.closest?.("[data-h]") as HTMLElement | null;
@@ -694,7 +787,7 @@ export default function BlockTetris() {
                 className="w-full max-w-xs rounded-2xl border border-white/10 bg-[#151833] p-5 text-center shadow-2xl"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  saveScore(nameDraft);
+                  void saveScore(nameDraft);
                 }}
               >
                 <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#f7931a]">
@@ -719,7 +812,7 @@ export default function BlockTetris() {
                 <div className="mt-4 flex gap-2">
                   <button
                     type="button"
-                    onClick={() => saveScore(null)}
+                    onClick={() => void saveScore(null)}
                     className="flex-1 rounded-xl border border-white/15 px-3 py-2 text-sm font-semibold text-white/80 hover:bg-white/10"
                   >
                     Skip
@@ -766,7 +859,10 @@ export default function BlockTetris() {
               {GHOST_UNTIL.toLocaleString()} points.
             </li>
             <li>Hover a piece to see its block. Click to pin it.</li>
-            <li>Make the Top 10 and you can add your name to the leaderboard.</li>
+            <li>
+              Make the Top 10 and you can add your name to the leaderboard, shared by
+              everyone who plays.
+            </li>
           </ul>
           <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-3">
             {CONTROLS.map(([keys, label]) => (
@@ -779,10 +875,91 @@ export default function BlockTetris() {
             ))}
           </dl>
         </section>
+
+        <section
+          className="rounded-2xl border border-white/10 bg-white/[0.04] p-4"
+          style={{ width: BOARD_SIZE }}
+          aria-labelledby="block-explorer"
+        >
+          <div className="flex items-baseline justify-between gap-3">
+            <h2
+              id="block-explorer"
+              className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#9a9dc0]"
+            >
+              Block explorer
+            </h2>
+            {explorerStats ? (
+              <p className="truncate text-xs text-[#8b8fb0]">
+                {`Avg ${explorerStats.avgTxs.toLocaleString()} txs · ${formatBtc(explorerStats.avgFee, unit)} fees per block`}
+              </p>
+            ) : null}
+          </div>
+          {explorerBlocks.length === 0 ? (
+            <p className="mt-2 text-sm leading-6 text-[#8b8fb0]">
+              Blocks you play show up here with their height, mining time, transactions,
+              value moved and fees.
+            </p>
+          ) : (
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full min-w-[360px] text-left text-xs tabular-nums">
+                <thead className="text-[10px] uppercase tracking-wide text-[#8b8fb0]">
+                  <tr>
+                    <th className="py-1.5 pr-2 font-semibold">Block</th>
+                    <th className="py-1.5 pr-2 font-semibold">Mined</th>
+                    <th className="py-1.5 pr-2 text-right font-semibold">Txs</th>
+                    <th className="py-1.5 pr-2 text-right font-semibold">Value</th>
+                    <th className="py-1.5 text-right font-semibold">Fees</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {explorerBlocks.map((block) => {
+                    const shape = game.shapeOf.get(block.height)?.name ?? shapeForTxCount(block.txs);
+                    const selected = block.height === focus?.height;
+                    return (
+                      <tr
+                        key={block.height}
+                        onMouseEnter={() => setHovered(block)}
+                        onMouseLeave={() => setHovered(null)}
+                        onClick={() =>
+                          setPinned((prev) => (prev?.height === block.height ? null : block))
+                        }
+                        className={clsxm(
+                          "cursor-pointer text-white/90 hover:bg-white/[0.05]",
+                          selected && "bg-white/[0.07]"
+                        )}
+                      >
+                        <td className="py-1.5 pr-2">
+                          <span className="flex items-center gap-1.5 font-semibold">
+                            <span
+                              className="h-2.5 w-2.5 shrink-0 rounded-[2px]"
+                              style={{ background: SHAPE_COLOR[shape] }}
+                            />
+                            #{block.height.toLocaleString()}
+                            {block.height === active?.block.height ? (
+                              <span className="text-[10px] font-normal text-[#8b8fb0]">falling</span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td className="py-1.5 pr-2 text-[#b7bad6]">
+                          <span title={formatTime(block.time)}>{timeAgo(block.time, wallNow)}</span>
+                        </td>
+                        <td className="py-1.5 pr-2 text-right">{block.txs.toLocaleString()}</td>
+                        <td className="py-1.5 pr-2 text-right">{formatBtc(block.totalOut, unit)}</td>
+                        <td className="py-1.5 text-right text-[#f7931a]">
+                          {formatBtc(block.totalFee, unit, 4)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       </div>
 
       <div className="order-3 flex flex-col gap-4">
-        <Panel title="Top 10">
+        <Panel title={shared ? "Top 10 · all players" : "Top 10"}>
           {scores.length === 0 ? (
             <p className="mt-3 text-sm text-[#8b8fb0]">
               No scores yet. Be the first on the board.
@@ -791,10 +968,10 @@ export default function BlockTetris() {
             <ol className="mt-3 flex flex-col gap-1">
               {scores.map((entry, i) => (
                 <li
-                  key={entry.at}
+                  key={scoreKey(entry)}
                   className={clsxm(
                     "flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm",
-                    entry.at === latestScoreAt ? "bg-[#f7931a]/20" : "bg-white/[0.03]"
+                    scoreKey(entry) === latestScoreAt ? "bg-[#f7931a]/20" : "bg-white/[0.03]"
                   )}
                 >
                   <span className="w-5 shrink-0 text-right text-xs font-bold text-[#8b8fb0]">

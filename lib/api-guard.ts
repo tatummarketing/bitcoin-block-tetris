@@ -235,12 +235,13 @@ function corsHeaders(req: NextRequest): Record<string, string> {
   };
 }
 
-/** Host allowlist + GET-only + rate limit. Returns a Response to short-circuit, or null. */
+/** Host allowlist + method allowlist (GET by default) + rate limit. Returns a Response to short-circuit, or null. */
 export function guardApiRequest(
   req: NextRequest,
-  rate?: RateOpts
+  rate?: RateOpts,
+  methods: readonly string[] = ["GET", "HEAD"]
 ): NextResponse | null {
-  if (req.method !== "GET" && req.method !== "HEAD") {
+  if (!methods.includes(req.method)) {
     return methodNotAllowed();
   }
   return assertAllowedHost(req) || assertRateLimit(req, rate);

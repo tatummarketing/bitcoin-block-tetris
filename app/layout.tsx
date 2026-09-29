@@ -3,7 +3,7 @@ import { Poppins } from "next/font/google";
 import "./globals.css";
 
 const OG_IMAGE =
-  "https://cdn.prod.website-files.com/618a9dc0e5826661c77e6a67/6abb5894d28a591d590aed07_bitcoin-block-tetris-og.png";
+  "https://cdn.prod.website-files.com/618a9dc0e5826661c77e6a67/6abb5f682e5be3f82678c5bf_bitcoin-block-tetris-og-v2.png";
 
 const poppins = Poppins({
   subsets: ["latin"],

@@ -11,7 +11,8 @@ Live at [apps.tatum.io/bitcoin-block-tetris](https://apps.tatum.io/bitcoin-block
 - It replays the last 48 blocks, adds new ones as they're mined, then rewinds into older history
 - Full lines clear; the game speeds up every 500 points; the landing outline disappears past 2,100 points
 - Hover a piece for its block stats, click to pin
-- Top 10 leaderboard (name + score) is stored in the browser
+- The block explorer under the board lists the blocks in play: height, mining time, transactions, value moved and fees
+- Top 10 leaderboard (name + score) is shared by all players and stored in Webflow Cloud SQLite (see below); the browser keeps a copy and falls back to it if the API is unreachable
 
 Controls: ←/→ move, ↑ or X rotate, Z rotate back, ↓ soft drop, Enter hard drop, Space pause.
 
@@ -45,6 +46,18 @@ webflow cloud deploy \
 ```
 
 Set `TATUM_API_KEY` (secret), `BTC_CHAIN=bitcoin-mainnet` and `NEXT_PUBLIC_BASE_PATH=/bitcoin-block-tetris` in the Cloud environment variables dashboard, then redeploy.
+
+### Leaderboard storage
+
+The shared Top 10 lives in a Webflow Cloud SQLite (D1) database bound as `LEADERBOARD`. Declare it in the local `wrangler.json` (git-ignored because it also carries the deploy vars); Webflow Cloud provisions the database on deploy and `lib/leaderboard.ts` creates the `scores` table on first use:
+
+```json
+"d1_databases": [
+  { "binding": "LEADERBOARD", "database_name": "leaderboard", "database_id": "local" }
+]
+```
+
+`POST /api/scores` rejects scores the rules can't produce for the reported lines and blocks, and is rate limited to 6 per minute per IP. Under plain `npm run dev` there is no binding, so the API returns 503 and the game keeps scores in the browser.
 
 ## API proxy safety
 
