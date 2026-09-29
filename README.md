@@ -38,6 +38,7 @@ Deployed to the **Tatum Apps** site at mount `/bitcoin-block-tetris`.
 webflow auth login
 webflow cloud deploy \
   --site-id 618a9dc0e5826661c77e6a67 \
+  --app-id 3daa974f-b24a-4b2c-9ed2-b981f3fd5973 \
   --environment production \
   --mount /bitcoin-block-tetris \
   --auto-publish
