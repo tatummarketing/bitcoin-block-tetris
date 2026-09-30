@@ -1,4 +1,4 @@
-import type { BtcBlock, BtcNetwork } from "@/lib/types";
+import type { BtcBlock, BtcNetwork, BtcTx } from "@/lib/types";
 
 const NETWORKS: Record<string, Omit<BtcNetwork, "chain">> = {
   "bitcoin-mainnet": {
@@ -41,10 +41,12 @@ const STATS = [
 ];
 
 const TIP_TTL_MS = 30_000;
-const BLOCK_CACHE_CAP = 5_000;
+const TX_CACHE_CAP = 500;
 
 let tipCache: { height: number; at: number } | null = null;
-const blockCache = new Map<number, BtcBlock>();
+let catalog: { height: number; hash: string; txids: string[]; stats: BtcBlock } | null =
+  null;
+const txCache = new Map<string, BtcTx>();
 
 export function btcNetwork(): BtcNetwork {
   const raw = process.env.BTC_CHAIN?.trim() || "bitcoin-mainnet";
@@ -102,6 +104,17 @@ function num(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function btcToSats(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.round(value * 1e8);
+  }
+  if (typeof value === "string") {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.round(n * 1e8) : 0;
+  }
+  return 0;
+}
+
 function parseStats(raw: unknown): BtcBlock | null {
   if (!raw || typeof raw !== "object") return null;
   const s = raw as Record<string, unknown>;
@@ -126,6 +139,53 @@ function parseStats(raw: unknown): BtcBlock | null {
   };
 }
 
+function parseTx(
+  raw: unknown,
+  index: number,
+  height: number,
+  blockHash: string
+): BtcTx | null {
+  if (!raw || typeof raw !== "object") return null;
+  const tx = raw as Record<string, unknown>;
+  if (typeof tx.txid !== "string") return null;
+  const vin = Array.isArray(tx.vin) ? tx.vin : [];
+  const vout = Array.isArray(tx.vout) ? tx.vout : [];
+  const valueSats = vout.reduce(
+    (sum, out) =>
+      sum + (out && typeof out === "object" ? btcToSats((out as { value?: unknown }).value) : 0),
+    0
+  );
+  const coinbase = vin.some(
+    (input) =>
+      input &&
+      typeof input === "object" &&
+      typeof (input as { coinbase?: unknown }).coinbase === "string"
+  );
+  return {
+    id: tx.txid,
+    index,
+    height,
+    blockHash,
+    time: num(tx.blocktime) || num(tx.time),
+    valueSats,
+    size: num(tx.size),
+    vsize: num(tx.vsize) || num(tx.size),
+    weight: num(tx.weight),
+    ins: vin.length,
+    outs: vout.length,
+    coinbase,
+  };
+}
+
+function rememberTx(tx: BtcTx) {
+  txCache.set(tx.id, tx);
+  while (txCache.size > TX_CACHE_CAP) {
+    const oldest = txCache.keys().next().value;
+    if (oldest === undefined) break;
+    txCache.delete(oldest);
+  }
+}
+
 /** Chain height, shared across visitors for TIP_TTL_MS so polling stays cheap. */
 export async function getTip(): Promise<number> {
   const now = Date.now();
@@ -136,29 +196,65 @@ export async function getTip(): Promise<number> {
   return count;
 }
 
-/** Stats for heights `from..to` (inclusive, ascending). Only uncached heights hit Tatum. */
-export async function getBlocks(from: number, to: number): Promise<BtcBlock[]> {
-  const heights: number[] = [];
-  for (let h = from; h <= to; h++) heights.push(h);
-
-  const missing = heights.filter((h) => !blockCache.has(h));
-  if (missing.length > 0) {
-    const raws = await btcRpcBatch(
-      missing.map((h) => ({ method: "getblockstats", params: [h, STATS] }))
-    );
-    for (const raw of raws) {
-      const block = parseStats(raw);
-      if (!block) continue;
-      blockCache.set(block.height, block);
-    }
-    while (blockCache.size > BLOCK_CACHE_CAP) {
-      const oldest = blockCache.keys().next().value;
-      if (oldest === undefined) break;
-      blockCache.delete(oldest);
-    }
+/**
+ * Header + txids of the current tip block. One `getblock` per new height (~10 min),
+ * shared by every player.
+ */
+export async function getCurrentBlock(): Promise<{
+  tip: number;
+  block: BtcBlock;
+  totalTxs: number;
+}> {
+  const tip = await getTip();
+  if (catalog?.height === tip) {
+    return { tip, block: catalog.stats, totalTxs: catalog.txids.length };
   }
 
-  return heights
-    .map((h) => blockCache.get(h))
-    .filter((block): block is BtcBlock => block != null);
+  const [hashRaw] = await btcRpcBatch([{ method: "getblockhash", params: [tip] }]);
+  if (typeof hashRaw !== "string") throw new Error("Unexpected block hash");
+
+  const [statsRaw, blockRaw] = await btcRpcBatch([
+    { method: "getblockstats", params: [tip, STATS] },
+    { method: "getblock", params: [hashRaw, 1] },
+  ]);
+  const stats = parseStats(statsRaw);
+  const header = blockRaw && typeof blockRaw === "object" ? (blockRaw as Record<string, unknown>) : null;
+  const txids = Array.isArray(header?.tx)
+    ? header.tx.filter((id): id is string => typeof id === "string")
+    : [];
+  if (!stats || txids.length === 0) throw new Error("Could not load the current block");
+
+  catalog = { height: tip, hash: hashRaw, txids, stats };
+  return { tip, block: stats, totalTxs: txids.length };
+}
+
+/** Page of transactions from the current tip block. Uncached txs are fetched in one RPC batch. */
+export async function getCurrentTxs(offset: number, limit: number): Promise<{
+  tip: number;
+  block: BtcBlock;
+  totalTxs: number;
+  offset: number;
+  txs: BtcTx[];
+}> {
+  const current = await getCurrentBlock();
+  const txids = catalog?.height === current.tip ? catalog.txids : [];
+  const start = Math.max(0, offset);
+  const ids = txids.slice(start, start + limit);
+  const missing = ids.filter((id) => !txCache.has(id));
+  if (missing.length > 0) {
+    const raws = await btcRpcBatch(
+      missing.map((id) => ({ method: "getrawtransaction", params: [id, true] }))
+    );
+    missing.forEach((id, i) => {
+      const index = start + ids.indexOf(id);
+      const parsed = parseTx(raws[i], index, current.tip, current.block.hash);
+      if (parsed) rememberTx(parsed);
+    });
+  }
+
+  const txs = ids
+    .map((id) => txCache.get(id) ?? null)
+    .filter((tx): tx is BtcTx => tx != null);
+
+  return { ...current, offset: start, txs };
 }

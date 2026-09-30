@@ -14,11 +14,11 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://apps.tatum.io/bitcoin-block-tetris"),
   title: "Bitcoin Block Tetris · Tatum",
   description:
-    "Stack real Bitcoin blocks. Each piece is shaped by its transaction count. Hover a piece for its block stats. Powered by Tatum RPC.",
+    "Stack real Bitcoin transactions from the latest block. Each piece is shaped by how much BTC it sends. Powered by Tatum RPC.",
   openGraph: {
     title: "Bitcoin Block Tetris · Tatum",
     description:
-      "Live Bitcoin mainnet blocks fall as pieces. Stack them, clear lines, top the leaderboard.",
+      "Transactions from the latest Bitcoin block fall as pieces. Stack them, clear lines, top the leaderboard.",
     url: "https://apps.tatum.io/bitcoin-block-tetris",
     siteName: "Tatum",
     type: "website",
@@ -29,7 +29,7 @@ export const metadata: Metadata = {
     images: [OG_IMAGE],
     title: "Bitcoin Block Tetris · Tatum",
     description:
-      "Live Bitcoin mainnet blocks fall as pieces. Stack them, clear lines, top the leaderboard.",
+      "Transactions from the latest Bitcoin block fall as pieces. Stack them, clear lines, top the leaderboard.",
   },
 };
 

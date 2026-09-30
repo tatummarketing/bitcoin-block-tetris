@@ -11,23 +11,22 @@ import {
   SHAPE_COLOR,
   covers,
   createGame,
-  enqueueBlocks,
+  enqueueTxs,
   ghostY,
   hardDrop,
   moveActive,
   peekShape,
   rotateActive,
-  shapeForTxCount,
+  shapeForValue,
   shapeMatrix,
   softDrop,
   step,
   type GameState,
   type ShapeName,
 } from "@/lib/block-game";
-import type { BtcBlock, BtcBlocksPayload, BtcNetwork } from "@/lib/types";
-import { clsxm, formatBtc, formatSats } from "@/lib/utils";
+import type { BtcBlock, BtcBlockPayload, BtcNetwork, BtcTx, BtcTxsPayload } from "@/lib/types";
+import { clsxm, formatBtc, formatSats, shortenHash } from "@/lib/utils";
 
-const REPLAY_DEPTH = 48;
 const PAGE = 12;
 const LOW_WATER = 4;
 const TIP_POLL_MS = 60_000;
@@ -60,11 +59,13 @@ const EXPLORER_ROWS = 8;
 
 type Feed = {
   tip: number | null;
+  playHeight: number | null;
   startTip: number | null;
-  forward: number;
-  backward: number;
+  offset: number;
+  totalTxs: number;
   loading: boolean;
   retryAt: number;
+  exhausted: boolean;
 };
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -253,19 +254,22 @@ export default function BlockTetris() {
   const gameRef = React.useRef<GameState>(createGame());
   const feedRef = React.useRef<Feed>({
     tip: null,
+    playHeight: null,
     startTip: null,
-    forward: 0,
-    backward: -1,
+    offset: 0,
+    totalTxs: 0,
     loading: false,
     retryAt: 0,
+    exhausted: false,
   });
   const phaseRef = React.useRef<Phase>("idle");
   const [, setFrame] = React.useState(0);
   const [phase, setPhaseState] = React.useState<Phase>("idle");
   const [network, setNetwork] = React.useState<BtcNetwork | null>(null);
+  const [chainBlock, setChainBlock] = React.useState<BtcBlock | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  const [hovered, setHovered] = React.useState<BtcBlock | null>(null);
-  const [pinned, setPinned] = React.useState<BtcBlock | null>(null);
+  const [hovered, setHovered] = React.useState<BtcTx | null>(null);
+  const [pinned, setPinned] = React.useState<BtcTx | null>(null);
   const [scores, setScoresState] = React.useState<HighScore[]>([]);
   const scoresRef = React.useRef<HighScore[]>([]);
   const [shared, setShared] = React.useState(false);
@@ -300,64 +304,69 @@ export default function BlockTetris() {
     void refreshScores();
   }, [refreshScores, setScores]);
 
-  const loadRange = React.useCallback(async (from: number, to: number) => {
-    const data = await fetchJson<BtcBlocksPayload>(
-      apiUrl(`/api/btc/blocks?from=${from}&to=${to}`)
+  const loadTxs = React.useCallback(async (offset: number, front = false) => {
+    const data = await fetchJson<BtcTxsPayload>(
+      apiUrl(`/api/btc/txs?offset=${offset}&limit=${PAGE}`)
     );
     const feed = feedRef.current;
-    feed.tip = Math.max(feed.tip ?? 0, data.tip);
+    const switched = feed.playHeight != null && data.tip !== feed.playHeight;
+    feed.tip = data.tip;
+    feed.totalTxs = data.totalTxs;
     setNetwork(data.network);
-    return data.blocks;
+    if (data.block) setChainBlock(data.block);
+    if (switched) {
+      feed.playHeight = data.tip;
+      feed.offset = 0;
+      feed.exhausted = false;
+    }
+    const page = switched
+      ? (
+          await fetchJson<BtcTxsPayload>(apiUrl(`/api/btc/txs?offset=0&limit=${PAGE}`))
+        ).txs
+      : data.txs;
+    const start = switched ? 0 : data.offset;
+    enqueueTxs(gameRef.current, page, front || switched);
+    feed.playHeight = data.tip;
+    feed.offset = Math.min(start + PAGE, data.totalTxs);
+    feed.exhausted = feed.offset >= data.totalTxs;
+    if (feed.startTip == null) feed.startTip = data.tip;
+    return page.length;
   }, []);
 
   const topUp = React.useCallback(async () => {
     const feed = feedRef.current;
     if (feed.loading || Date.now() < feed.retryAt) return;
     if (gameRef.current.queue.length >= LOW_WATER) return;
+    if (feed.exhausted) return;
     feed.loading = true;
     try {
-      if (feed.tip == null) {
-        const data = await fetchJson<BtcBlocksPayload>(apiUrl("/api/btc/blocks"));
-        setNetwork(data.network);
-        feed.tip = data.tip;
-        feed.startTip = data.tip;
-        feed.forward = Math.max(0, data.tip - REPLAY_DEPTH + 1);
-        feed.backward = feed.forward - 1;
-      }
-      if (feed.forward <= feed.tip) {
-        const from = feed.forward;
-        const to = Math.min(from + PAGE - 1, feed.tip);
-        enqueueBlocks(gameRef.current, await loadRange(from, to));
-        feed.forward = to + 1;
-      } else if (feed.backward >= 0) {
-        const to = feed.backward;
-        const from = Math.max(0, to - PAGE + 1);
-        enqueueBlocks(gameRef.current, (await loadRange(from, to)).reverse());
-        feed.backward = from - 1;
-      }
+      await loadTxs(feed.offset);
       setError(null);
       bump();
     } catch (err) {
       feed.retryAt = Date.now() + RETRY_MS;
-      setError(err instanceof Error ? err.message : "Could not load blocks");
+      setError(err instanceof Error ? err.message : "Could not load transactions");
     } finally {
       feed.loading = false;
     }
-  }, [bump, loadRange]);
+  }, [bump, loadTxs]);
 
   const pollTip = React.useCallback(async () => {
     const feed = feedRef.current;
     if (feed.tip == null || feed.loading) return;
     feed.loading = true;
     try {
-      const data = await fetchJson<BtcBlocksPayload>(apiUrl("/api/btc/blocks"));
-      const caughtUp = feed.forward > feed.tip;
-      feed.tip = Math.max(feed.tip, data.tip);
-      if (caughtUp && feed.forward <= feed.tip) {
-        const from = feed.forward;
-        const to = Math.min(from + PAGE - 1, feed.tip);
-        enqueueBlocks(gameRef.current, await loadRange(from, to), true);
-        feed.forward = to + 1;
+      const data = await fetchJson<BtcBlockPayload>(apiUrl("/api/btc/blocks"));
+      setNetwork(data.network);
+      if (data.block) setChainBlock(data.block);
+      const freshBlock = data.tip > (feed.tip ?? 0);
+      feed.tip = data.tip;
+      feed.totalTxs = data.totalTxs;
+      if (freshBlock) {
+        feed.playHeight = data.tip;
+        feed.offset = 0;
+        feed.exhausted = false;
+        await loadTxs(0, true);
       }
       bump();
     } catch {
@@ -365,7 +374,7 @@ export default function BlockTetris() {
     } finally {
       feed.loading = false;
     }
-  }, [bump, loadRange]);
+  }, [bump, loadTxs]);
 
   const finish = React.useCallback(() => {
     const score = gameRef.current.score;
@@ -394,7 +403,7 @@ export default function BlockTetris() {
         /* storage may be unavailable */
       }
       const { lines, totals } = gameRef.current;
-      const saved = await postSharedScore({ name: clean, score, lines, blocks: totals.blocks });
+      const saved = await postSharedScore({ name: clean, score, lines, blocks: totals.pieces });
       if (saved) {
         setShared(true);
         setScores(saved.top);
@@ -445,9 +454,17 @@ export default function BlockTetris() {
   }, [setPhase]);
 
   const restart = React.useCallback(() => {
-    const next = createGame();
-    enqueueBlocks(next, gameRef.current.queue);
-    gameRef.current = next;
+    gameRef.current = createGame();
+    feedRef.current = {
+      tip: null,
+      playHeight: null,
+      startTip: null,
+      offset: 0,
+      totalTxs: 0,
+      loading: false,
+      retryAt: 0,
+      exhausted: false,
+    };
     setPinned(null);
     setHovered(null);
     setLatestScoreAt(null);
@@ -523,40 +540,39 @@ export default function BlockTetris() {
   const next = game.queue[0] ?? null;
   const ghost = active ? ghostY(game.grid, active.shape, active.x, active.y) : 0;
   const unit = network?.unit ?? "BTC";
-  const focus = hovered ?? pinned ?? active?.block ?? null;
+  const focus = hovered ?? pinned ?? active?.tx ?? null;
   const focusShape = focus
-    ? game.shapeOf.get(focus.height) ?? { name: shapeForTxCount(focus.txs), varied: false }
+    ? game.shapeOf.get(focus.id) ?? { name: shapeForValue(focus.valueSats), varied: false }
     : null;
   const focusLabel = hovered ? "Hovered" : pinned ? "Pinned" : active ? "Falling" : null;
-  const isNew = (block: BtcBlock) =>
-    feed.startTip != null && block.height > feed.startTip;
-  const replaying = feed.tip != null && feed.forward <= feed.tip;
-  const rewinding =
-    next != null && feed.startTip != null && next.height <= feed.startTip - REPLAY_DEPTH;
+  const isNew = (tx: BtcTx) => feed.startTip != null && tx.height > feed.startTip;
+  const waitingForBlock =
+    feed.exhausted && !active && game.queue.length === 0 && phase === "playing";
   const now = performance.now();
   const clearToast =
     game.lastClear && now - game.lastClear.at < 1400 ? game.lastClear : null;
   const levelToast = game.levelUpAt != null && now - game.levelUpAt < 1600;
   const nextSpeedUp = game.level * POINTS_PER_LEVEL;
   const wallNow = Date.now();
-  const explorerBlocks = (active ? [active.block, ...game.recent] : game.recent).slice(
+  const explorerTxs = (active ? [active.tx, ...game.recent] : game.recent).slice(
     0,
     EXPLORER_ROWS
   );
   const explorerStats =
     game.recent.length > 0
       ? {
-          avgTxs: Math.round(
-            game.recent.reduce((sum, b) => sum + b.txs, 0) / game.recent.length
+          avgValue:
+            game.recent.reduce((sum, tx) => sum + tx.valueSats, 0) / game.recent.length,
+          avgVsize: Math.round(
+            game.recent.reduce((sum, tx) => sum + tx.vsize, 0) / game.recent.length
           ),
-          avgFee: game.recent.reduce((sum, b) => sum + b.totalFee, 0) / game.recent.length,
         }
       : null;
 
-  const blockAt = (target: EventTarget | null): BtcBlock | null => {
-    const el = (target as HTMLElement | null)?.closest?.("[data-h]") as HTMLElement | null;
-    const height = el?.dataset.h ? Number(el.dataset.h) : NaN;
-    return Number.isFinite(height) ? game.known.get(height) ?? null : null;
+  const txAt = (target: EventTarget | null): BtcTx | null => {
+    const el = (target as HTMLElement | null)?.closest?.("[data-id]") as HTMLElement | null;
+    const id = el?.dataset.id;
+    return id ? game.known.get(id) ?? null : null;
   };
 
   const cells: React.ReactNode[] = [];
@@ -564,25 +580,25 @@ export default function BlockTetris() {
     for (let x = 0; x < COLS; x++) {
       const stacked = game.grid[y][x];
       let color = stacked?.color ?? null;
-      let height = stacked?.height ?? null;
+      let id = stacked?.id ?? null;
       let ghostCell = false;
       if (active && activeName) {
         if (covers(active.shape, x - active.x, y - active.y)) {
           color = SHAPE_COLOR[activeName];
-          height = active.block.height;
+          id = active.tx.id;
         } else if (showGhost && !stacked && covers(active.shape, x - active.x, y - ghost)) {
           color = SHAPE_COLOR[activeName];
           ghostCell = true;
         }
       }
-      const focused = !ghostCell && height != null && height === focus?.height;
+      const focused = !ghostCell && id != null && id === focus?.id;
       cells.push(
         <div
           key={`${x}-${y}`}
-          data-h={!ghostCell && height != null ? height : undefined}
+          data-id={!ghostCell && id != null ? id : undefined}
           className={clsxm(
             "rounded-[3px]",
-            height != null && !ghostCell && "cursor-pointer",
+            id != null && !ghostCell && "cursor-pointer",
             focused && "brightness-125"
           )}
           style={{
@@ -608,67 +624,72 @@ export default function BlockTetris() {
           <div className="mt-3 grid gap-3">
             <Stat
               label="Current block"
-              value={active ? `#${active.block.height.toLocaleString()}` : "—"}
+              value={
+                chainBlock
+                  ? `#${chainBlock.height.toLocaleString()}`
+                  : feed.tip != null
+                    ? `#${feed.tip.toLocaleString()}`
+                    : "—"
+              }
               hint={
-                active
-                  ? `${active.block.txs.toLocaleString()} txs · ${isNew(active.block) ? "just mined" : "replay"}`
-                  : "Waiting for a piece"
+                chainBlock
+                  ? `${chainBlock.txs.toLocaleString()} txs · mined ${formatTime(chainBlock.time)}`
+                  : "Waiting for the chain"
               }
             />
             <Stat
               label="Chain tip"
               value={feed.tip != null ? `#${feed.tip.toLocaleString()}` : "—"}
-              hint={network?.label ?? "Bitcoin"}
+              hint={
+                feed.exhausted
+                  ? "Waiting for the next block (~10 min)"
+                  : network?.label ?? "Bitcoin"
+              }
             />
             <Stat
               label="Transactions stacked"
-              value={game.totals.txs.toLocaleString()}
+              value={game.totals.pieces.toLocaleString()}
             />
             <Stat
               label="Value moved"
               value={formatBtc(game.totals.valueSats, unit)}
             />
             <Stat
-              label="Total fees"
-              value={formatBtc(game.totals.feeSats, unit)}
-              hint={formatSats(game.totals.feeSats)}
+              label="Block fees"
+              value={chainBlock ? formatBtc(chainBlock.totalFee, unit) : "—"}
+              hint={chainBlock ? formatSats(chainBlock.totalFee) : undefined}
             />
           </div>
         </Panel>
-        <Panel title={focusLabel ? `Block info · ${focusLabel}` : "Block info"}>
+        <Panel title={focusLabel ? `Transaction · ${focusLabel}` : "Transaction"}>
           {focus ? (
             <div className="mt-2">
-              <p className="text-2xl font-extrabold tabular-nums text-white">
-                #{focus.height.toLocaleString()}
+              <p className="font-mono text-sm font-extrabold text-white">
+                {shortenHash(focus.id, 8)}
               </p>
               <p className="text-xs text-[#8b8fb0]">
-                Mined {formatTime(focus.time)} · {focusShape?.name} piece
-                {focusShape?.varied ? ` (varied from ${shapeForTxCount(focus.txs)})` : ""}
+                #{focus.height.toLocaleString()} · tx {focus.index + 1}
+                {focus.coinbase ? " · coinbase" : ""} · {focusShape?.name} piece
+                {focusShape?.varied
+                  ? ` (varied from ${shapeForValue(focus.valueSats)})`
+                  : ""}
               </p>
               <dl className="mt-3 divide-y divide-white/5">
-                <Row label="Transactions">{focus.txs.toLocaleString()}</Row>
-                <Row label="Value moved">{formatBtc(focus.totalOut, unit)}</Row>
-                <Row label="Fees">{formatSats(focus.totalFee)}</Row>
-                <Row label="Block reward">{formatBtc(focus.subsidy, unit, 8)}</Row>
-                <Row label="Avg fee rate">
-                  {`${(focus.weight > 0
-                    ? focus.totalFee / (focus.weight / 4)
-                    : focus.avgFeeRate
-                  ).toLocaleString(undefined, { maximumFractionDigits: 2 })} sat/vB`}
-                </Row>
-                <Row label="Median fee">{formatSats(focus.medianFee)}</Row>
+                <Row label="Included">{formatTime(focus.time)}</Row>
+                <Row label="Value sent">{formatBtc(focus.valueSats, unit, 8)}</Row>
+                <Row label="Size">{`${focus.vsize.toLocaleString()} vB`}</Row>
+                <Row label="Weight">{focus.weight.toLocaleString()}</Row>
                 <Row label="Inputs / outputs">
                   {`${focus.ins.toLocaleString()} / ${focus.outs.toLocaleString()}`}
                 </Row>
-                <Row label="SegWit txs">{focus.segwitTxs.toLocaleString()}</Row>
-                <Row label="Size">{`${(focus.size / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 })} kB`}</Row>
+                <Row label="In block">#{focus.height.toLocaleString()}</Row>
               </dl>
               <p className="mt-3 break-all font-mono text-[11px] leading-4 text-[#8b8fb0]">
-                {focus.hash}
+                {focus.id}
               </p>
               {network ? (
                 <a
-                  href={`${network.explorer}/block/${focus.hash}`}
+                  href={`${network.explorer}/tx/${focus.id}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mt-2 inline-block text-sm font-semibold text-[#f7931a] hover:underline"
@@ -679,11 +700,11 @@ export default function BlockTetris() {
             </div>
           ) : (
             <p className="mt-3 text-sm leading-6 text-[#8b8fb0]">
-              Hover any piece to see its block here. Click a piece to pin it.
+              Hover any piece to see its transaction here. Click a piece to pin it.
             </p>
           )}
         </Panel>
-        <Panel title="Shape by transactions">
+        <Panel title="Shape by BTC sent">
           <ul className="mt-3 grid grid-cols-2 gap-1.5">
             {SHAPE_BANDS.map((band) => (
               <li
@@ -700,8 +721,8 @@ export default function BlockTetris() {
             ))}
           </ul>
           <p className="mt-2 text-xs leading-5 text-[#8b8fb0]">
-            Transactions per block, set from a day of mainnet blocks. If one shape
-            keeps repeating, the next piece borrows a neighbouring shape.
+            Transactions in BTC, from the latest mainnet block. If one shape keeps
+            repeating, the next piece borrows a neighbouring shape.
           </p>
         </Panel>
       </div>
@@ -717,13 +738,13 @@ export default function BlockTetris() {
             role="img"
             aria-label="Block well"
             onMouseMove={(event) => {
-              const block = blockAt(event.target);
-              if (block?.height !== hovered?.height) setHovered(block);
+              const tx = txAt(event.target);
+              if (tx?.id !== hovered?.id) setHovered(tx);
             }}
             onMouseLeave={() => setHovered(null)}
             onClick={(event) => {
-              const block = blockAt(event.target);
-              if (block) setPinned((prev) => (prev?.height === block.height ? null : block));
+              const tx = txAt(event.target);
+              if (tx) setPinned((prev) => (prev?.id === tx.id ? null : tx));
             }}
           >
             {cells}
@@ -753,10 +774,10 @@ export default function BlockTetris() {
                 </p>
                 <p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-[#b7bad6]">
                   {phase === "idle"
-                    ? "Every piece is a real Bitcoin block from Tatum. Its shape comes from how many transactions it holds."
+                    ? "Every piece is a real transaction from the latest Bitcoin block. A new block only lands about every 10 minutes."
                     : phase === "paused"
-                      ? "No blocks are fetched while paused."
-                      : `${game.score.toLocaleString()} points · ${game.lines} lines · ${game.totals.blocks} blocks`}
+                      ? "No data is fetched while paused."
+                      : `${game.score.toLocaleString()} points · ${game.lines} lines · ${game.totals.pieces} txs`}
                 </p>
                 <button
                   type="button"
@@ -768,10 +789,16 @@ export default function BlockTetris() {
                 </button>
               </div>
             </div>
+          ) : waitingForBlock ? (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <p className="max-w-[16rem] rounded-2xl bg-black/50 px-4 py-3 text-center text-sm font-semibold leading-5 text-white">
+                Caught up with this block. Waiting for the next Bitcoin block (~10 min).
+              </p>
+            </div>
           ) : !active && game.queue.length === 0 ? (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
               <p className="rounded-full bg-black/50 px-4 py-2 text-sm font-semibold text-white">
-                Fetching blocks from Tatum…
+                Fetching the current block from Tatum…
               </p>
             </div>
           ) : null}
@@ -843,8 +870,12 @@ export default function BlockTetris() {
           </h2>
           <ul className="mt-2 space-y-1.5 text-sm leading-6 text-[#c9cbe4]">
             <li>
-              Each piece is a real Bitcoin block. Its shape comes from how many
-              transactions it holds.
+              Each piece is a real transaction from the latest Bitcoin block, fetched
+              live through Tatum. Its shape comes from how much BTC it sends.
+            </li>
+            <li>
+              A Bitcoin block takes about 10 minutes. You play through that block&apos;s
+              transactions; you don&apos;t get a new block on every drop.
             </li>
             <li>
               Fill a whole row to clear it. The game ends when the stack reaches the top.
@@ -858,7 +889,7 @@ export default function BlockTetris() {
               The outline showing where a piece will land disappears after{" "}
               {GHOST_UNTIL.toLocaleString()} points.
             </li>
-            <li>Hover a piece to see its block. Click to pin it.</li>
+            <li>Hover a piece to see its transaction. Click to pin it.</li>
             <li>
               Make the Top 10 and you can add your name to the leaderboard, shared by
               everyone who plays.
@@ -879,49 +910,49 @@ export default function BlockTetris() {
         <section
           className="rounded-2xl border border-white/10 bg-white/[0.04] p-4"
           style={{ width: BOARD_SIZE }}
-          aria-labelledby="block-explorer"
+          aria-labelledby="tx-explorer"
         >
           <div className="flex items-baseline justify-between gap-3">
             <h2
-              id="block-explorer"
+              id="tx-explorer"
               className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#9a9dc0]"
             >
-              Block explorer
+              Tx explorer
             </h2>
             {explorerStats ? (
               <p className="truncate text-xs text-[#8b8fb0]">
-                {`Avg ${explorerStats.avgTxs.toLocaleString()} txs · ${formatBtc(explorerStats.avgFee, unit)} fees per block`}
+                {`Avg ${formatBtc(explorerStats.avgValue, unit)} · ${explorerStats.avgVsize} vB`}
               </p>
             ) : null}
           </div>
-          {explorerBlocks.length === 0 ? (
+          {explorerTxs.length === 0 ? (
             <p className="mt-2 text-sm leading-6 text-[#8b8fb0]">
-              Blocks you play show up here with their height, mining time, transactions,
-              value moved and fees.
+              Transactions you play show up here with id, time, value sent, size and
+              inputs / outputs.
             </p>
           ) : (
             <div className="mt-2 overflow-x-auto">
               <table className="w-full min-w-[360px] text-left text-xs tabular-nums">
                 <thead className="text-[10px] uppercase tracking-wide text-[#8b8fb0]">
                   <tr>
-                    <th className="py-1.5 pr-2 font-semibold">Block</th>
-                    <th className="py-1.5 pr-2 font-semibold">Mined</th>
-                    <th className="py-1.5 pr-2 text-right font-semibold">Txs</th>
+                    <th className="py-1.5 pr-2 font-semibold">Tx</th>
+                    <th className="py-1.5 pr-2 font-semibold">Included</th>
                     <th className="py-1.5 pr-2 text-right font-semibold">Value</th>
-                    <th className="py-1.5 text-right font-semibold">Fees</th>
+                    <th className="py-1.5 pr-2 text-right font-semibold">Size</th>
+                    <th className="py-1.5 text-right font-semibold">In/Out</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {explorerBlocks.map((block) => {
-                    const shape = game.shapeOf.get(block.height)?.name ?? shapeForTxCount(block.txs);
-                    const selected = block.height === focus?.height;
+                  {explorerTxs.map((tx) => {
+                    const shape = game.shapeOf.get(tx.id)?.name ?? shapeForValue(tx.valueSats);
+                    const selected = tx.id === focus?.id;
                     return (
                       <tr
-                        key={block.height}
-                        onMouseEnter={() => setHovered(block)}
+                        key={tx.id}
+                        onMouseEnter={() => setHovered(tx)}
                         onMouseLeave={() => setHovered(null)}
                         onClick={() =>
-                          setPinned((prev) => (prev?.height === block.height ? null : block))
+                          setPinned((prev) => (prev?.id === tx.id ? null : tx))
                         }
                         className={clsxm(
                           "cursor-pointer text-white/90 hover:bg-white/[0.05]",
@@ -934,19 +965,19 @@ export default function BlockTetris() {
                               className="h-2.5 w-2.5 shrink-0 rounded-[2px]"
                               style={{ background: SHAPE_COLOR[shape] }}
                             />
-                            #{block.height.toLocaleString()}
-                            {block.height === active?.block.height ? (
+                            {shortenHash(tx.id)}
+                            {tx.id === active?.tx.id ? (
                               <span className="text-[10px] font-normal text-[#8b8fb0]">falling</span>
                             ) : null}
                           </span>
                         </td>
                         <td className="py-1.5 pr-2 text-[#b7bad6]">
-                          <span title={formatTime(block.time)}>{timeAgo(block.time, wallNow)}</span>
+                          <span title={formatTime(tx.time)}>{timeAgo(tx.time, wallNow)}</span>
                         </td>
-                        <td className="py-1.5 pr-2 text-right">{block.txs.toLocaleString()}</td>
-                        <td className="py-1.5 pr-2 text-right">{formatBtc(block.totalOut, unit)}</td>
+                        <td className="py-1.5 pr-2 text-right">{formatBtc(tx.valueSats, unit)}</td>
+                        <td className="py-1.5 pr-2 text-right">{`${tx.vsize} vB`}</td>
                         <td className="py-1.5 text-right text-[#f7931a]">
-                          {formatBtc(block.totalFee, unit, 4)}
+                          {`${tx.ins}/${tx.outs}`}
                         </td>
                       </tr>
                     );
@@ -995,7 +1026,7 @@ export default function BlockTetris() {
             </div>
             <Stat label="Level" value={game.level} hint={`Faster at ${nextSpeedUp.toLocaleString()}`} />
             <Stat label="Lines" value={game.lines} />
-            <Stat label="Blocks" value={game.totals.blocks} />
+            <Stat label="Txs" value={game.totals.pieces} />
           </div>
         </Panel>
         <Panel title="Up next">
@@ -1006,7 +1037,7 @@ export default function BlockTetris() {
               </div>
               <div className="min-w-0">
                 <p className="font-bold text-white">
-                  #{next.height.toLocaleString()}
+                  {shortenHash(next.id, 6)}
                   {isNew(next) ? (
                     <span className="ml-2 rounded bg-[#2ccd9a] px-1.5 py-0.5 text-[10px] font-bold text-[#04221a]">
                       NEW
@@ -1014,20 +1045,18 @@ export default function BlockTetris() {
                   ) : null}
                 </p>
                 <p className="text-sm text-[#8b8fb0]">
-                  {`${next.txs.toLocaleString()} txs · ${formatBtc(next.totalOut, unit)}`}
+                  {`${formatBtc(next.valueSats, unit)} · ${next.vsize} vB`}
                 </p>
                 <p className="text-xs text-[#8b8fb0]">
-                  {replaying
-                    ? "Replaying recent blocks"
-                    : rewinding
-                      ? "Caught up · rewinding older blocks"
-                      : "Caught up with the chain"}
+                  {feed.exhausted
+                    ? "Last txs of this block"
+                    : `From block #${next.height.toLocaleString()}`}
                 </p>
               </div>
             </div>
           ) : (
             <p className="mt-3 text-sm text-[#8b8fb0]">
-              {phase === "idle" ? "Press Space to load blocks." : "Queue is empty."}
+              {phase === "idle" ? "Press Space to load the current block." : "Waiting for the next block."}
             </p>
           )}
         </Panel>

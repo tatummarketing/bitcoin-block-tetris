@@ -1,4 +1,4 @@
-import type { BtcBlock } from "@/lib/types";
+import type { BtcTx } from "@/lib/types";
 
 export const COLS = 16;
 export const ROWS = 20;
@@ -17,17 +17,17 @@ export type ShapeName = "I" | "O" | "T" | "L" | "J" | "S" | "Z";
 export type Matrix = number[][];
 
 /**
- * Mainnet bands, each holding roughly a seventh of blocks (sampled over a day of
- * blocks: median ~4,050 txs, most between 2,900 and 6,600).
+ * Shape from how much BTC the transaction sends (sum of outputs). Log-ish bands so
+ * dust, typical payments and whale transfers each get their own piece.
  */
 export const SHAPE_BANDS: { name: ShapeName; max: number; label: string }[] = [
-  { name: "I", max: 3000, label: "≤3,000" },
-  { name: "O", max: 3600, label: "3,001–3,600" },
-  { name: "T", max: 3900, label: "3,601–3,900" },
-  { name: "L", max: 4500, label: "3,901–4,500" },
-  { name: "J", max: 5400, label: "4,501–5,400" },
-  { name: "S", max: 6200, label: "5,401–6,200" },
-  { name: "Z", max: Number.POSITIVE_INFINITY, label: "6,201+" },
+  { name: "I", max: 10_000, label: "≤0.0001" },
+  { name: "O", max: 100_000, label: "0.0001–0.001" },
+  { name: "T", max: 1_000_000, label: "0.001–0.01" },
+  { name: "L", max: 10_000_000, label: "0.01–0.1" },
+  { name: "J", max: 100_000_000, label: "0.1–1" },
+  { name: "S", max: 1_000_000_000, label: "1–10" },
+  { name: "Z", max: Number.POSITIVE_INFINITY, label: "10+" },
 ];
 
 export const SHAPE_COLOR: Record<ShapeName, string> = {
@@ -70,12 +70,12 @@ const SHAPES: Record<ShapeName, Matrix> = {
   ],
 };
 
-export type Cell = { height: number; color: string } | null;
+export type Cell = { id: string; color: string } | null;
 
 export type PieceShape = { name: ShapeName; varied: boolean };
 
 export type ActivePiece = {
-  block: BtcBlock;
+  tx: BtcTx;
   name: ShapeName;
   shape: Matrix;
   x: number;
@@ -83,18 +83,16 @@ export type ActivePiece = {
 };
 
 export type Totals = {
-  blocks: number;
-  txs: number;
+  pieces: number;
   valueSats: number;
-  feeSats: number;
 };
 
 export type GameState = {
   grid: Cell[][];
   active: ActivePiece | null;
-  queue: BtcBlock[];
-  known: Map<number, BtcBlock>;
-  recent: BtcBlock[];
+  queue: BtcTx[];
+  known: Map<string, BtcTx>;
+  recent: BtcTx[];
   lastDrop: number;
   score: number;
   lines: number;
@@ -104,17 +102,17 @@ export type GameState = {
   lastClear: { rows: number; points: number; at: number } | null;
   levelUpAt: number | null;
   shapeHistory: ShapeName[];
-  shapeOf: Map<number, PieceShape>;
+  shapeOf: Map<string, PieceShape>;
 };
 
-function bandIndex(txs: number): number {
-  const n = Math.max(0, Math.floor(txs));
+function bandIndex(valueSats: number): number {
+  const n = Math.max(0, Math.floor(valueSats));
   const i = SHAPE_BANDS.findIndex((band) => n <= band.max);
   return i === -1 ? SHAPE_BANDS.length - 1 : i;
 }
 
-export function shapeForTxCount(txs: number): ShapeName {
-  return SHAPE_BANDS[bandIndex(txs)].name;
+export function shapeForValue(valueSats: number): ShapeName {
+  return SHAPE_BANDS[bandIndex(valueSats)].name;
 }
 
 function overused(history: ShapeName[], name: ShapeName): boolean {
@@ -127,17 +125,17 @@ function overused(history: ShapeName[], name: ShapeName): boolean {
 }
 
 /**
- * The tx-count shape, unless it has repeated too much lately. Then the nearest
- * band that isn't overused wins, trying first the side the tx count leans toward.
+ * The value-based shape, unless it has repeated too much lately. Then the nearest
+ * band that isn't overused wins, trying first the side the value leans toward.
  */
-export function pickShape(history: ShapeName[], txs: number): PieceShape {
-  const natural = bandIndex(txs);
+export function pickShape(history: ShapeName[], valueSats: number): PieceShape {
+  const natural = bandIndex(valueSats);
   const name = SHAPE_BANDS[natural].name;
   if (!overused(history, name)) return { name, varied: false };
 
   const lo = natural === 0 ? 0 : SHAPE_BANDS[natural - 1].max + 1;
   const hi = SHAPE_BANDS[natural].max;
-  const leansUp = Number.isFinite(hi) ? txs - lo > (hi - lo) / 2 : true;
+  const leansUp = Number.isFinite(hi) ? valueSats - lo > (hi - lo) / 2 : true;
   const sign = leansUp ? 1 : -1;
   for (let d = 1; d < SHAPE_BANDS.length; d++) {
     for (const step of [sign * d, -sign * d]) {
@@ -148,9 +146,9 @@ export function pickShape(history: ShapeName[], txs: number): PieceShape {
   return { name, varied: false };
 }
 
-/** Shape the next queued block will get if it spawns now. */
-export function peekShape(game: GameState, block: BtcBlock): PieceShape {
-  return game.shapeOf.get(block.height) ?? pickShape(game.shapeHistory, block.txs);
+/** Shape the next queued tx will get if it spawns now. */
+export function peekShape(game: GameState, tx: BtcTx): PieceShape {
+  return game.shapeOf.get(tx.id) ?? pickShape(game.shapeHistory, tx.valueSats);
 }
 
 export function shapeMatrix(name: ShapeName): Matrix {
@@ -186,7 +184,7 @@ export function createGame(): GameState {
     lines: 0,
     level: 1,
     over: false,
-    totals: { blocks: 0, txs: 0, valueSats: 0, feeSats: 0 },
+    totals: { pieces: 0, valueSats: 0 },
     lastClear: null,
     levelUpAt: null,
     shapeHistory: [],
@@ -234,14 +232,10 @@ export function ghostY(grid: Cell[][], shape: Matrix, x: number, y: number): num
   return next;
 }
 
-/** Adds unseen blocks to the back of the queue, or the front for freshly mined ones. */
-export function enqueueBlocks(
-  game: GameState,
-  blocks: BtcBlock[],
-  front = false
-): number {
-  const fresh = blocks.filter((block) => !game.known.has(block.height));
-  for (const block of fresh) game.known.set(block.height, block);
+/** Adds unseen txs to the back of the queue, or the front for a freshly mined block. */
+export function enqueueTxs(game: GameState, txs: BtcTx[], front = false): number {
+  const fresh = txs.filter((tx) => !game.known.has(tx.id));
+  for (const tx of fresh) game.known.set(tx.id, tx);
   if (front) game.queue.unshift(...fresh);
   else game.queue.push(...fresh);
   if (game.queue.length > QUEUE_CAP) game.queue.length = QUEUE_CAP;
@@ -261,16 +255,16 @@ function clearLines(game: GameState, now: number) {
 
 function pruneKnown(game: GameState) {
   if (game.known.size < 600) return;
-  const keep = new Set<number>();
-  for (const row of game.grid) for (const cell of row) if (cell) keep.add(cell.height);
-  for (const block of game.queue) keep.add(block.height);
-  for (const block of game.recent) keep.add(block.height);
-  if (game.active) keep.add(game.active.block.height);
-  for (const height of game.known.keys()) {
-    if (!keep.has(height)) game.known.delete(height);
+  const keep = new Set<string>();
+  for (const row of game.grid) for (const cell of row) if (cell) keep.add(cell.id);
+  for (const tx of game.queue) keep.add(tx.id);
+  for (const tx of game.recent) keep.add(tx.id);
+  if (game.active) keep.add(game.active.tx.id);
+  for (const id of game.known.keys()) {
+    if (!keep.has(id)) game.known.delete(id);
   }
-  for (const height of game.shapeOf.keys()) {
-    if (!keep.has(height)) game.shapeOf.delete(height);
+  for (const id of game.shapeOf.keys()) {
+    if (!keep.has(id)) game.shapeOf.delete(id);
   }
 }
 
@@ -284,15 +278,13 @@ function lockActive(game: GameState, now: number) {
       const gy = active.y + row;
       const gx = active.x + col;
       if (gy >= 0 && gy < ROWS && gx >= 0 && gx < COLS) {
-        game.grid[gy][gx] = { height: active.block.height, color };
+        game.grid[gy][gx] = { id: active.tx.id, color };
       }
     }
   }
-  game.totals.blocks += 1;
-  game.totals.txs += active.block.txs;
-  game.totals.valueSats += active.block.totalOut;
-  game.totals.feeSats += active.block.totalFee;
-  game.recent.unshift(active.block);
+  game.totals.pieces += 1;
+  game.totals.valueSats += active.tx.valueSats;
+  game.recent.unshift(active.tx);
   if (game.recent.length > RECENT_CAP) game.recent.length = RECENT_CAP;
   game.active = null;
   clearLines(game, now);
@@ -300,20 +292,20 @@ function lockActive(game: GameState, now: number) {
 }
 
 function spawnNext(game: GameState, now: number): boolean {
-  const block = game.queue.shift();
-  if (!block) return false;
-  const picked = pickShape(game.shapeHistory, block.txs);
+  const tx = game.queue.shift();
+  if (!tx) return false;
+  const picked = pickShape(game.shapeHistory, tx.valueSats);
   const shape = shapeMatrix(picked.name);
   const x = Math.floor((COLS - (shape[0]?.length ?? 0)) / 2);
   if (!fits(game.grid, shape, x, 0)) {
-    game.queue.unshift(block);
+    game.queue.unshift(tx);
     game.over = true;
     return true;
   }
   game.shapeHistory.unshift(picked.name);
   if (game.shapeHistory.length > HISTORY_CAP) game.shapeHistory.length = HISTORY_CAP;
-  game.shapeOf.set(block.height, picked);
-  game.active = { block, name: picked.name, shape, x, y: 0 };
+  game.shapeOf.set(tx.id, picked);
+  game.active = { tx, name: picked.name, shape, x, y: 0 };
   game.lastDrop = now;
   return true;
 }

@@ -15,3 +15,9 @@ export function formatSats(sats?: number | null) {
   if (sats == null || Number.isNaN(sats)) return "n/a";
   return `${Math.round(sats).toLocaleString("en-US")} sats`;
 }
+
+export function shortenHash(value: string, size = 4) {
+  if (!value) return "n/a";
+  if (value.length <= size * 2) return value;
+  return `${value.slice(0, size)}…${value.slice(-size)}`;
+}

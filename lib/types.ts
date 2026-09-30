@@ -1,4 +1,4 @@
-/** One Bitcoin block as a falling piece, from `getblockstats`. Amounts are in satoshis. */
+/** Latest Bitcoin block, from `getblockstats`. Amounts are in satoshis. */
 export type BtcBlock = {
   height: number;
   hash: string;
@@ -16,6 +16,22 @@ export type BtcBlock = {
   segwitTxs: number;
 };
 
+/** One transaction from the current block, used as a Tetris piece. Amounts are in satoshis. */
+export type BtcTx = {
+  id: string;
+  index: number;
+  height: number;
+  blockHash: string;
+  time: number;
+  valueSats: number;
+  size: number;
+  vsize: number;
+  weight: number;
+  ins: number;
+  outs: number;
+  coinbase: boolean;
+};
+
 export type BtcNetwork = {
   chain: string;
   label: string;
@@ -23,9 +39,20 @@ export type BtcNetwork = {
   explorer: string;
 };
 
-export type BtcBlocksPayload = {
+export type BtcBlockPayload = {
   network: BtcNetwork;
   tip: number;
-  blocks: BtcBlock[];
+  block: BtcBlock | null;
+  totalTxs: number;
+  updatedAt: string;
+};
+
+export type BtcTxsPayload = {
+  network: BtcNetwork;
+  tip: number;
+  block: BtcBlock | null;
+  totalTxs: number;
+  offset: number;
+  txs: BtcTx[];
   updatedAt: string;
 };
