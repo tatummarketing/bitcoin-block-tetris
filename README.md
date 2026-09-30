@@ -10,7 +10,7 @@ Live at [apps.tatum.io/bitcoin-block-tetris](https://apps.tatum.io/bitcoin-block
 - When a new block is mined, its transactions jump the queue. If you finish the current block first, the game waits for the next one
 - The piece shape follows how much BTC the transaction sends (`SHAPE_BANDS` in `lib/block-game.ts`)
 - A shape that repeats too often (3 in a row, or 3 of the last 7) is swapped for the nearest neighbouring shape
-- Full lines clear; the game speeds up every 500 points; the landing outline disappears past 2,100 points
+- Full lines clear; every 500 points the pause between gravity steps shortens a little (it never drops below a playable floor); the landing outline disappears past 2,100 points
 - Hover a piece for its transaction; click to pin
 - The explorer under the board lists txs in play: id, time, value, size, inputs / outputs
 - Top 10 leaderboard (name + score) is shared by all players and stored in Webflow Cloud SQLite (see below); the browser keeps a copy and falls back to it if the API is unreachable

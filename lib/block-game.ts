@@ -202,8 +202,13 @@ function addScore(game: GameState, points: number, now: number) {
   }
 }
 
+/** Pause between gravity steps. Each level shortens that pause by DROP_STEP_MS. */
+const DROP_START_MS = 650;
+const DROP_STEP_MS = 18;
+const DROP_MIN_MS = 240;
+
 export function dropInterval(level: number): number {
-  return Math.max(90, 650 - (level - 1) * 55);
+  return Math.max(DROP_MIN_MS, DROP_START_MS - (level - 1) * DROP_STEP_MS);
 }
 
 export function fits(grid: Cell[][], shape: Matrix, x: number, y: number): boolean {
