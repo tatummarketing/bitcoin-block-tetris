@@ -202,13 +202,18 @@ function addScore(game: GameState, points: number, now: number) {
   }
 }
 
-/** Pause between gravity steps. Each level shortens that pause by DROP_STEP_MS. */
+/**
+ * Pause between gravity steps. Every 500 points (one level) shortens that pause
+ * by DROP_STEP_MS. The old 240ms floor made speed freeze around 11,000 points;
+ * keep cutting until a one-frame-ish cap so each level-up is still faster.
+ */
 const DROP_START_MS = 650;
 const DROP_STEP_MS = 18;
-const DROP_MIN_MS = 240;
+const DROP_MIN_MS = 50;
 
 export function dropInterval(level: number): number {
-  return Math.max(DROP_MIN_MS, DROP_START_MS - (level - 1) * DROP_STEP_MS);
+  const n = Math.max(1, Math.floor(level));
+  return Math.max(DROP_MIN_MS, DROP_START_MS - (n - 1) * DROP_STEP_MS);
 }
 
 export function fits(grid: Cell[][], shape: Matrix, x: number, y: number): boolean {
